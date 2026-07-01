@@ -14,11 +14,12 @@ import yfinance as yf
 from nicegui import ui, run
 
 SAVE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)) if '__file__' in dir() else os.getcwd(), 'stockmind_data.json')
+SAVE_VERSION = 3  # bump this to auto-invalidate saves from older versions
 
 def save_state():
-    """Persist all user state to disk."""
     try:
         data = {
+            'version': SAVE_VERSION,
             'watchlist': WATCHLIST,
             'profile': profile,
             'settings': settings,
@@ -26,7 +27,7 @@ def save_state():
             'state_ticker': state.get('ticker', 'AAPL'),
             'state_period': state.get('period', '3mo'),
             'state_chart_type': state.get('chart_type', 'candles'),
-            'chat_log': chat_log[-50:],  # keep last 50 messages
+            'chat_log': chat_log[-50:],
         }
         with open(SAVE_FILE, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=2, default=str)
@@ -34,23 +35,28 @@ def save_state():
         print('Save error:', e)
 
 def load_state():
-    """Load persisted user state from disk, returning defaults if file doesn't exist."""
+    """Load persisted state. Returns None if missing, corrupt, or wrong version (auto-deletes stale file)."""
     try:
         if not os.path.exists(SAVE_FILE):
             return None
         with open(SAVE_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
+            data = json.load(f)
+        if data.get('version') != SAVE_VERSION:
+            print('Old save file detected — clearing and starting fresh')
+            os.remove(SAVE_FILE)
+            return None
+        return data
     except Exception as e:
         print('Load error:', e)
         return None
 
 def reset_to_defaults():
-    """Clear all saved state and reset to factory defaults."""
     try:
         if os.path.exists(SAVE_FILE):
             os.remove(SAVE_FILE)
-    except Exception:
-        pass
+            print('Save file deleted:', SAVE_FILE)
+    except Exception as e:
+        print('Reset error:', e)
 
 import httpx
 
@@ -392,6 +398,11 @@ def to_ema(h, n):
     return [{'time': int(pd.Timestamp(ts).timestamp()), 'value': round(float(v), 2)} for ts, v in s.items()]
 
 def get_price(ticker):
+    # Use fast_info for live price (same source as header ticker display)
+    q = fetch_quote_fast(ticker, cache_seconds=10)
+    if q and q.get('price'):
+        return q['price']
+    # Fall back to last daily close if fast_info fails
     h, _ = fetch(ticker, '1d', need_info=False)
     if h.empty:
         return None
@@ -1133,11 +1144,7 @@ def build_chart_view(c):
                     ICO('ti-zoom-out', 'color:var(--text2);', 13)
                 with D('width:24px;height:24px;border-radius:5px;background:var(--bg2);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;cursor:pointer;').on('click', lambda e: ui.run_javascript('window.smZoomReset && window.smZoomReset()')).tooltip('Reset zoom'):
                     ICO('ti-zoom-reset', 'color:var(--text2);', 13)
-        ui.timer(0.15, lambda: ui.run_javascript('window.smInit && window.smInit();'), once=True)
-        if state.get('last_chart_js') and state.get('last_chart_ticker') == state.get('ticker'):
-            ui.timer(0.35, lambda: ui.run_javascript(state['last_chart_js']), once=True)
-        else:
-            ui.timer(0.1, lambda: load_stock(state['ticker'], state['period']), once=True)
+        ui.timer(0.2, lambda: load_stock(state['ticker'], state['period']), once=True)
 
         with R('gap:6px;margin-top:8px;flex-wrap:wrap;align-items:center;'):
             L('DRAW', '').classes('sec-label')
@@ -1220,19 +1227,15 @@ def build_portfolio_view(c):
         gl_col = 'var(--green)' if gl >= 0 else 'var(--red)'
         stats = get_perf_stats()
         n_pos = len(account['positions'])
-        best = max(account['positions'].items(), key=lambda x: (fetch_quote_fast(x[0]) or {}).get('price', x[1]['avg_cost']), default=(None, None)) if account['positions'] else (None, None)
-        best_sym = best[0] or '--'
-        best_pos = account['positions'].get(best_sym)
-        best_pct = round((((fetch_quote_fast(best_sym) or {}).get('price') or best_pos['avg_cost']) - best_pos['avg_cost']) / best_pos['avg_cost'] * 100, 2) if best_pos else 0
 
         # ── 4 stat cards ──────────────────────────────────────────────────────
         ICONS = ['ti-wallet', 'ti-trending-up', 'ti-chart-pie', 'ti-star']
         ICON_COLS = ['#6366f1', 'var(--green)' if gl >= 0 else 'var(--red)', '#f59e0b', '#ec4899']
         cards = [
             ('Portfolio Value', '${:,.2f}'.format(pv), '${:+,.2f}  ({:+.1f}%)'.format(gl, gl_pct), gl_col),
-            ('Day Change', '${:+,.2f}'.format(gl), '{:+.2f}%'.format(gl_pct), gl_col),
-            ('Total Positions', str(n_pos), '{} completed trades'.format(stats.get('total_trades', 0)), 'var(--text3)'),
-            ('Best Performer', best_sym, '{:+.2f}%'.format(best_pct), 'var(--green)' if best_pct >= 0 else 'var(--red)'),
+            ('Total P&L', '${:+,.2f}'.format(gl), '{:+.2f}% all time'.format(gl_pct), gl_col),
+            ('Positions', str(n_pos), '{} completed trades'.format(stats.get('total_trades', 0)), 'var(--text3)'),
+            ('Win Rate', '{:.0f}%'.format(stats.get('win_rate', 0)), 'across {} trades'.format(stats.get('total_trades', 0)), 'var(--green)'),
         ]
         with R('gap:10px;margin-bottom:16px;flex-wrap:wrap;'):
             for (lbl, val, sub, scol), ico, icol in zip(cards, ICONS, ICON_COLS):
@@ -1293,120 +1296,121 @@ def build_portfolio_view(c):
             L('Loading portfolio...', 'font-size:11px;color:var(--text3);')
 
         async def load_body():
-            symbols = list(account['positions'].keys())
             try:
+                symbols = list(account['positions'].keys())
                 quotes = await run.io_bound(fetch_holdings_batch, symbols)
             except Exception:
                 quotes = {}
 
-            holdings = []
-            total_val = 0
-            sector_totals = {}
-            for sym, pos in account['positions'].items():
-                q = quotes.get(sym) or {}
-                curr = q.get('price') or pos['avg_cost']
-                name_p = q.get('name', sym)
-                sector_p = q.get('sector', 'Other')
-                val = round(curr * pos['shares'], 2)
-                gl_p = round((curr - pos['avg_cost']) * pos['shares'], 2)
-                gl_pct_p = round((curr - pos['avg_cost']) / pos['avg_cost'] * 100, 2) if pos['avg_cost'] else 0
-                holdings.append({'sym': sym, 'name': name_p, 'sector': sector_p, 'shares': pos['shares'],
-                                  'avg': pos['avg_cost'], 'curr': curr, 'val': val, 'gl': gl_p, 'gl_pct': gl_pct_p})
-                total_val += val
-                sector_totals[sector_p] = sector_totals.get(sector_p, 0) + val
+            try:
+                holdings = []
+                total_val = 0
+                for sym, pos in account['positions'].items():
+                    q = quotes.get(sym) or {}
+                    curr = q.get('price') or pos['avg_cost']
+                    name_p = q.get('name', sym)
+                    sector_p = q.get('sector', 'Other')
+                    val = round(curr * pos['shares'], 2)
+                    gl_p = round((curr - pos['avg_cost']) * pos['shares'], 2)
+                    gl_pct_p = round((curr - pos['avg_cost']) / pos['avg_cost'] * 100, 2) if pos['avg_cost'] else 0
+                    holdings.append({'sym': sym, 'name': name_p, 'sector': sector_p,
+                                      'shares': pos['shares'], 'avg': pos['avg_cost'],
+                                      'curr': curr, 'val': val, 'gl': gl_p, 'gl_pct': gl_pct_p})
+                    total_val += val
 
-            holdings.sort(key=lambda x: x['val'], reverse=True)
-            palette = ['#6366f1', '#10b981', '#f59e0b', '#ec4899', '#3b82f6', '#f97316', '#8b5cf6', '#14b8a6', '#06b6d4', '#84cc16']
+                holdings.sort(key=lambda x: x['val'], reverse=True)
+                palette = ['#6366f1', '#10b981', '#f59e0b', '#ec4899', '#3b82f6',
+                           '#f97316', '#8b5cf6', '#14b8a6', '#06b6d4', '#84cc16']
 
-            # Build portfolio history from trade log
-            hist_labels, hist_values = [], []
-            running = account['start_cash']
-            if account['history']:
-                for trade in sorted(account['history'], key=lambda x: x.get('date', '')):
-                    hist_labels.append(trade.get('date', '')[:10])
-                    cost = trade['shares'] * trade['price']
-                    if trade['action'] == 'BUY':
-                        running -= cost
-                    else:
-                        running += cost
-                    hist_values.append(round(running + total_val, 2))
-            if not hist_labels:
-                hist_labels = ['Start', 'Now']
-                hist_values = [account['start_cash'], round(total_val + account['cash'], 2)]
+                # Build portfolio history — use 'type' key (that's what buy_stock/sell_stock writes)
+                hist_labels, hist_values = [], []
+                if account['history']:
+                    running_cash = account['start_cash']
+                    for trade in sorted(account['history'], key=lambda x: x.get('date', '')):
+                        t = trade.get('type', trade.get('action', 'BUY'))
+                        delta = trade.get('total', trade['shares'] * trade['price'])
+                        running_cash += -delta if t == 'BUY' else delta
+                        hist_labels.append(trade.get('date', '')[:10])
+                        hist_values.append(round(running_cash + total_val, 2))
+                if len(hist_labels) < 2:
+                    hist_labels = ['Start', 'Now']
+                    hist_values = [account['start_cash'], round(total_val + account['cash'], 2)]
 
-            body_ref.clear()
-            with body_ref:
-                # ── Main row: history chart + donut ───────────────────────────
-                with R('gap:12px;align-items:stretch;flex-wrap:wrap;margin-bottom:12px;'):
+                body_ref.clear()
+                with body_ref:
+                    with R('gap:12px;align-items:stretch;flex-wrap:wrap;margin-bottom:12px;'):
+                        with D('flex:2;min-width:300px;background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:18px;'):
+                            with R('justify-content:space-between;align-items:center;margin-bottom:14px;'):
+                                with C('gap:2px;'):
+                                    L('Portfolio History', 'font-size:13px;font-weight:600;color:var(--white);')
+                                    L('Value across trades', 'font-size:9px;color:var(--text3);font-family:var(--mono);')
+                                with R('gap:4px;align-items:center;'):
+                                    D('width:8px;height:8px;border-radius:50%;background:#6366f1;')
+                                    L('Total Value', 'font-size:9px;color:var(--text2);font-family:var(--mono);')
+                            with D('height:180px;'):
+                                ui.element('canvas').props('id="portfolio-hist"').style('width:100%;height:180px;')
 
-                    # Portfolio history chart
-                    with D('flex:2;min-width:300px;background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:18px;'):
-                        with R('justify-content:space-between;align-items:center;margin-bottom:14px;'):
-                            with C('gap:2px;'):
-                                L('Portfolio History', 'font-size:13px;font-weight:600;color:var(--white);')
-                                L('Simulated value over trade history', 'font-size:9px;color:var(--text3);font-family:var(--mono);')
-                            with R('gap:3px;align-items:center;'):
-                                D('width:8px;height:8px;border-radius:50%;background:#6366f1;')
-                                L('Total Value', 'font-size:9px;color:var(--text2);font-family:var(--mono);')
-                        with D('height:180px;'):
-                            ui.element('canvas').props('id="portfolio-hist"').style('width:100%;height:180px;')
+                        with D('flex:1;min-width:240px;background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:18px;'):
+                            L('Composition', 'font-size:13px;font-weight:600;color:var(--white);margin-bottom:14px;')
+                            with R('gap:14px;align-items:center;'):
+                                with D('width:150px;height:150px;position:relative;flex-shrink:0;'):
+                                    ui.element('canvas').props('id="portfolio-pie"').style('width:150px;height:150px;')
+                                    with C('position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);align-items:center;pointer-events:none;'):
+                                        L('${:,.0f}'.format(pv), 'font-size:13px;font-weight:700;color:var(--white);font-family:var(--mono);')
+                                        L('total', 'font-size:8px;color:var(--text3);font-family:var(--mono);')
+                                with C('gap:6px;flex:1;'):
+                                    for i, hd in enumerate(holdings[:6]):
+                                        pct = (hd['val'] / total_val * 100) if total_val else 0
+                                        with R('justify-content:space-between;align-items:center;'):
+                                            with R('gap:5px;align-items:center;'):
+                                                D('width:8px;height:8px;border-radius:2px;background:{};flex-shrink:0;'.format(palette[i % len(palette)]))
+                                                L(hd['sym'], 'font-size:10px;color:var(--white);font-family:var(--mono);font-weight:500;')
+                                            L('{:.1f}%'.format(pct), 'font-size:10px;color:var(--text2);font-family:var(--mono);')
 
-                    # Donut chart
-                    with D('flex:1;min-width:240px;background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:18px;'):
-                        L('Portfolio Composition', 'font-size:13px;font-weight:600;color:var(--white);margin-bottom:14px;')
-                        with R('gap:16px;align-items:center;'):
-                            with D('width:150px;height:150px;position:relative;flex-shrink:0;'):
-                                ui.element('canvas').props('id="portfolio-pie"').style('width:150px;height:150px;')
-                                with C('position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);align-items:center;pointer-events:none;'):
-                                    L('${:,.0f}'.format(pv), 'font-size:13px;font-weight:700;color:var(--white);font-family:var(--mono);')
-                                    L('total', 'font-size:8px;color:var(--text3);font-family:var(--mono);')
-                            with C('gap:5px;flex:1;'):
-                                for i, hd in enumerate(holdings[:6]):
-                                    pct = (hd['val'] / total_val * 100) if total_val else 0
-                                    with R('justify-content:space-between;align-items:center;'):
-                                        with R('gap:6px;align-items:center;'):
-                                            D('width:8px;height:8px;border-radius:2px;background:{};flex-shrink:0;'.format(palette[i % len(palette)]))
-                                            L(hd['sym'], 'font-size:10px;color:var(--white);font-family:var(--mono);font-weight:500;')
-                                        L('{:.1f}%'.format(pct), 'font-size:10px;color:var(--text2);font-family:var(--mono);')
+                    with D('background:var(--bg2);border:1px solid var(--border);border-radius:10px;overflow:hidden;'):
+                        with R('padding:14px 16px;border-bottom:1px solid var(--border);align-items:center;gap:8px;'):
+                            L('Holdings', 'font-size:13px;font-weight:600;color:var(--white);')
+                            with D('background:var(--bg3);border-radius:5px;padding:2px 8px;'):
+                                L('{} positions'.format(len(holdings)), 'font-size:9px;color:var(--text2);font-family:var(--mono);')
+                        with R('padding:8px 16px;background:var(--bg3);'):
+                            for hdr, w in [('ASSET','flex:2;'), ('SHARES','flex:1;'), ('AVG','flex:1;'), ('CURRENT','flex:1;'), ('VALUE','flex:1;'), ('P&L','flex:1;')]:
+                                L(hdr, 'font-size:8px;color:var(--text3);font-family:var(--mono);letter-spacing:.8px;{}'.format(w))
+                        for idx, hd in enumerate(holdings):
+                            pc = 'var(--green)' if hd['gl'] >= 0 else 'var(--red)'
+                            with D('border-bottom:1px solid var(--border);').on('click', lambda e, s=hd['sym']: ui.timer(0.05, lambda: load_stock(s), once=True)):
+                                with R('padding:12px 16px;align-items:center;').classes('trade-row').style('border-radius:0;margin:0;'):
+                                    with R('gap:8px;align-items:center;flex:2;'):
+                                        D('width:10px;height:10px;border-radius:3px;background:{};flex-shrink:0;'.format(palette[idx % len(palette)]))
+                                        with C('gap:1px;'):
+                                            L(hd['sym'], 'font-size:12px;font-weight:600;color:var(--white);font-family:var(--mono);')
+                                            L(hd['name'][:20], 'font-size:9px;color:var(--text3);')
+                                    L(str(hd['shares']), 'font-size:11px;color:var(--white);font-family:var(--mono);flex:1;')
+                                    L('${:.2f}'.format(hd['avg']), 'font-size:11px;color:var(--text2);font-family:var(--mono);flex:1;')
+                                    L('${:.2f}'.format(hd['curr']), 'font-size:11px;color:var(--white);font-family:var(--mono);flex:1;')
+                                    L('${:,.2f}'.format(hd['val']), 'font-size:11px;font-weight:500;color:var(--white);font-family:var(--mono);flex:1;')
+                                    with C('gap:1px;flex:1;'):
+                                        L('{:+.2f}%'.format(hd['gl_pct']), 'font-size:11px;font-weight:600;color:{};font-family:var(--mono);'.format(pc))
+                                        L('${:+,.2f}'.format(hd['gl']), 'font-size:9px;color:{};font-family:var(--mono);'.format(pc))
 
-                # ── Holdings table ─────────────────────────────────────────────
-                with D('background:var(--bg2);border:1px solid var(--border);border-radius:10px;overflow:hidden;'):
-                    with R('padding:14px 16px;border-bottom:1px solid var(--border);align-items:center;gap:8px;'):
-                        L('Holdings', 'font-size:13px;font-weight:600;color:var(--white);')
-                        with D('background:var(--bg3);border-radius:5px;padding:2px 8px;'):
-                            L('{} positions'.format(len(holdings)), 'font-size:9px;color:var(--text2);font-family:var(--mono);')
-                    # table header
-                    with R('padding:8px 16px;background:var(--bg3);'):
-                        for hdr, w in [('ASSET', 'flex:2;'), ('SHARES', 'flex:1;'), ('AVG COST', 'flex:1;'), ('CURRENT', 'flex:1;'), ('VALUE', 'flex:1;'), ('P&L', 'flex:1;')]:
-                            L(hdr, 'font-size:8px;color:var(--text3);font-family:var(--mono);letter-spacing:.8px;{}'.format(w))
-                    for hd in holdings:
-                        pc = 'var(--green)' if hd['gl'] >= 0 else 'var(--red)'
-                        with D('border-bottom:1px solid var(--border);').on('click', lambda e, s=hd['sym']: ui.timer(0.05, lambda: load_stock(s), once=True)):
-                            with R('padding:12px 16px;align-items:center;').classes('trade-row').style('border-radius:0;margin:0;'):
-                                with R('gap:8px;align-items:center;flex:2;'):
-                                    D('width:10px;height:10px;border-radius:3px;background:{};flex-shrink:0;'.format(palette[holdings.index(hd) % len(palette)]))
-                                    with C('gap:1px;'):
-                                        L(hd['sym'], 'font-size:12px;font-weight:600;color:var(--white);font-family:var(--mono);')
-                                        L(hd['name'][:20], 'font-size:9px;color:var(--text3);')
-                                L(str(hd['shares']), 'font-size:11px;color:var(--white);font-family:var(--mono);flex:1;')
-                                L('${:.2f}'.format(hd['avg']), 'font-size:11px;color:var(--text2);font-family:var(--mono);flex:1;')
-                                L('${:.2f}'.format(hd['curr']), 'font-size:11px;color:var(--white);font-family:var(--mono);flex:1;')
-                                L('${:,.2f}'.format(hd['val']), 'font-size:11px;font-weight:500;color:var(--white);font-family:var(--mono);flex:1;')
-                                with C('gap:1px;flex:1;'):
-                                    L('{:+.2f}%'.format(hd['gl_pct']), 'font-size:11px;font-weight:600;color:{};font-family:var(--mono);'.format(pc))
-                                    L('${:+,.2f}'.format(hd['gl']), 'font-size:9px;color:{};font-family:var(--mono);'.format(pc))
+                pie_labels = [hd['sym'] for hd in holdings]
+                pie_values = [hd['val'] for hd in holdings]
+                pie_colors = [palette[i % len(palette)] for i in range(len(holdings))]
+                if account['cash'] > 0:
+                    pie_labels.append('Cash')
+                    pie_values.append(account['cash'])
+                    pie_colors.append('#2a2a3a')
+                ui.timer(0.15, lambda: ui.run_javascript('smPieRender({},{},{})'.format(
+                    json.dumps(pie_labels), json.dumps(pie_values), json.dumps(pie_colors))), once=True)
+                ui.timer(0.15, lambda: ui.run_javascript('smHistRender({},{})'.format(
+                    json.dumps(hist_labels), json.dumps(hist_values))), once=True)
 
-            pie_labels = [hd['sym'] for hd in holdings]
-            pie_values = [hd['val'] for hd in holdings]
-            pie_colors = [palette[i % len(palette)] for i in range(len(holdings))]
-            if account['cash'] > 0:
-                pie_labels.append('Cash')
-                pie_values.append(account['cash'])
-                pie_colors.append('#2a2a3a')
-            ui.timer(0.15, lambda: ui.run_javascript('smPieRender({},{},{})'.format(json.dumps(pie_labels), json.dumps(pie_values), json.dumps(pie_colors))), once=True)
-            ui.timer(0.15, lambda: ui.run_javascript('smHistRender({},{})'.format(json.dumps(hist_labels), json.dumps(hist_values))), once=True)
+            except Exception as err:
+                body_ref.clear()
+                with body_ref:
+                    L('Error loading portfolio: {}'.format(str(err)), 'font-size:11px;color:var(--red);font-family:var(--mono);')
 
         ui.timer(0.05, load_body, once=True)
+
 
 
 def build_history_view(c):
@@ -1815,43 +1819,38 @@ def build_report_view(c):
 def build_news_view(c):
     c.clear()
     with c:
-        L('Market News and Alerts', 'font-size:15px;font-weight:600;color:var(--white);margin-bottom:10px;')
+        L('Market News', 'font-size:15px;font-weight:600;color:var(--white);margin-bottom:10px;')
 
         with D('').classes('card').style('margin-bottom:12px;'):
-            L('PRICE ALERTS', '').classes('sec-label').style('margin-bottom:8px;')
-            with R('gap:6px;margin-bottom:8px;flex-wrap:wrap;'):
-                al_sym = ui.input(placeholder='Ticker').props('outlined dense').style('width:90px;')
-                al_ab = ui.input(placeholder='Alert above $').props('outlined dense').style('width:120px;')
-                al_bl = ui.input(placeholder='Alert below $').props('outlined dense').style('width:120px;')
-
-                def set_alert():
-                    sym = al_sym.value.strip().upper()
-                    if not sym:
-                        return
-                    alerts[sym] = {'above': float(al_ab.value) if al_ab.value else None, 'below': float(al_bl.value) if al_bl.value else None}
-                    al_sym.value = al_ab.value = al_bl.value = ''
+            L('NEWS SEARCH', '').classes('sec-label').style('margin-bottom:8px;')
+            with R('gap:6px;align-items:center;flex-wrap:wrap;'):
+                news_in = ui.input(placeholder='Enter tickers e.g. AAPL, TSLA, BTC-USD').props('outlined dense').style('width:300px;')
+                news_in.value = state.get('news_tickers', state['ticker'])
+                def load_news():
+                    state['news_tickers'] = news_in.value.strip().upper()
                     build_news_view(c)
-                ui.button('Set', on_click=set_alert).classes('pill active').style('font-size:11px;')
-            if alerts:
-                for sym, al in list(alerts.items()):
-                    with R('gap:8px;background:var(--bg3);border:1px solid var(--border);border-radius:5px;padding:5px 10px;margin-bottom:3px;'):
-                        L(sym, 'font-size:12px;font-weight:600;color:var(--white);font-family:var(--mono);width:60px;')
-                        if al.get('above'):
-                            L('Above ${:.2f}'.format(al['above']), 'font-size:11px;color:var(--green);font-family:var(--mono);flex:1;')
-                        if al.get('below'):
-                            L('Below ${:.2f}'.format(al['below']), 'font-size:11px;color:var(--red);font-family:var(--mono);flex:1;')
-                        ui.button('x', on_click=lambda e, s=sym: (alerts.pop(s, None), build_news_view(c))).style('background:transparent;color:var(--text3);font-size:13px;padding:0 4px;min-width:0;')
+                ui.button('Search', on_click=load_news).classes('pill active').style('font-size:11px;')
+                ui.button('My Holdings', on_click=lambda e: (
+                    setattr(news_in, 'value', ', '.join(list(account['positions'].keys())[:5] or [state['ticker']])),
+                    load_news()
+                )).classes('pill').style('font-size:11px;')
+                news_in.on('keydown.enter', load_news)
+            L('Separate multiple tickers with commas. Defaults to the stock you\'re currently viewing.', 'font-size:9px;color:var(--text3);font-family:var(--mono);margin-top:4px;')
 
-        tickers_to_watch = [state['ticker']] + list(account['positions'].keys()) + list(alerts.keys())
+        raw_tickers = state.get('news_tickers', state['ticker'])
+        tickers_to_watch = [t.strip().upper() for t in raw_tickers.replace(',', ' ').split() if t.strip()]
+        if not tickers_to_watch:
+            tickers_to_watch = [state['ticker']]
+
         seen = set()
         news_items = []
-        for sym in list(dict.fromkeys(tickers_to_watch))[:5]:
+        for sym in tickers_to_watch[:5]:
             for n in fetch_news(sym):
-                t = n.get('title', '')
-                if t and t not in seen:
-                    seen.add(t)
-                    time_str = ''
+                title = n.get('title', '')
+                if title and title not in seen:
+                    seen.add(title)
                     raw_t = n.get('pub_time_raw', '')
+                    time_str = ''
                     try:
                         if isinstance(raw_t, (int, float)) and raw_t:
                             time_str = datetime.fromtimestamp(raw_t).strftime('%d %b %H:%M')
@@ -1859,15 +1858,17 @@ def build_news_view(c):
                             time_str = raw_t[:16].replace('T', ' ')
                     except Exception:
                         time_str = ''
-                    news_items.append({'sym': sym, 'title': t, 'link': n.get('link', '#'), 'publisher': n.get('publisher', ''), 'time': time_str})
+                    news_items.append({'sym': sym, 'title': title, 'link': n.get('link', '#'),
+                                       'publisher': n.get('publisher', ''), 'time': time_str})
 
-        L('LATEST NEWS', '').classes('sec-label').style('margin-bottom:8px;')
+        L('LATEST NEWS — {}'.format(raw_tickers), '').classes('sec-label').style('margin-bottom:8px;')
         if not news_items:
-            with D('').classes('card').style('text-align:center;padding:20px;'):
-                L('No news available right now.', 'font-size:11px;color:var(--text2);margin-bottom:4px;')
-                L('Load a stock, add a position, or set an alert - news loads for tracked tickers.', 'font-size:10px;color:var(--text3);')
+            with D('').classes('card').style('text-align:center;padding:24px;'):
+                ICO('ti-news-off', 'color:var(--text3);font-size:28px;')
+                L('No news found for {}'.format(raw_tickers), 'font-size:12px;color:var(--text2);margin-top:10px;margin-bottom:4px;')
+                L('Check the ticker symbol is correct and try again.', 'font-size:10px;color:var(--text3);')
         for n in news_items[:20]:
-            with D('').classes('news-card').on('click', lambda e, url=n['link']: ui.run_javascript('window.open("' + url + '", "_blank")') if url and url != '#' else None):
+            with D('').classes('news-card').on('click', lambda e, url=n['link']: ui.run_javascript('window.open("{}", "_blank")'.format(url)) if url and url != '#' else None):
                 with R('justify-content:space-between;margin-bottom:4px;'):
                     L(n['sym'], 'font-size:9px;color:var(--accent);font-family:var(--mono);letter-spacing:1px;background:var(--bg3);padding:1px 5px;border-radius:3px;')
                     L(n['time'], 'font-size:9px;color:var(--text3);font-family:var(--mono);')
@@ -1880,8 +1881,33 @@ def build_settings_view(c):
         with R('justify-content:space-between;align-items:center;margin-bottom:12px;'):
             L('Settings', 'font-size:15px;font-weight:600;color:var(--white);')
             def reset_all():
+                # Delete the save file
                 reset_to_defaults()
-                ui.notify('All settings, portfolio and watchlist reset to defaults. Restart the app to apply.', type='warning', timeout=6000)
+                # Reset all in-memory state to defaults immediately
+                WATCHLIST.clear()
+                WATCHLIST.extend(['AAPL', 'NVDA', 'TSLA', 'MSFT', 'AMZN', 'META', 'GOOGL', 'AMD', 'NFLX', 'JPM'])
+                account['cash'] = 10000.00
+                account['start_cash'] = 10000.00
+                account['positions'].clear()
+                account['history'].clear()
+                profile['theme'] = 'green'
+                profile['username'] = 'Trader'
+                profile['avatar'] = '😀'
+                settings.update({'accent': '#10b981', 'chart_style': 'candles', 'show_ma20': True,
+                                  'show_ma50': True, 'show_ema12': False, 'show_volume': True})
+                state['ticker'] = 'AAPL'
+                state['period'] = '3mo'
+                state['chart_type'] = 'candles'
+                chat_log.clear()
+                chat_log.append({'role': 'ai', 'text': "Hey! I'm Max, your trading buddy. You've got $10,000 to practice with — zero risk, real market data. Ask me about any stock, what to watch out for, or whether a trade makes sense. What are you looking at today?"})
+                # Show dialog prompting refresh to fully reinitialise the UI
+                with ui.dialog() as dialog, ui.card().style('background:var(--bg2);border:1px solid var(--border);border-radius:10px;padding:24px;min-width:340px;'):
+                    L('Reset Complete', 'font-size:15px;font-weight:600;color:var(--white);margin-bottom:8px;')
+                    L('All data has been cleared and defaults restored. Click Refresh to reload the app with a clean slate.', 'font-size:12px;color:var(--text);line-height:1.6;margin-bottom:16px;')
+                    with R('gap:8px;justify-content:flex-end;'):
+                        ui.button('Refresh Now', on_click=lambda e: ui.run_javascript('window.location.reload()')).style(
+                            'background:var(--accent);color:#000;font-weight:600;border-radius:6px;padding:6px 16px;')
+                dialog.open()
             ui.button('Reset to Defaults', on_click=reset_all).style(
                 'font-size:10px;color:var(--red);background:transparent;border:1px solid #ef444444;'
                 'border-radius:5px;padding:4px 10px;font-family:var(--mono);'
@@ -2046,11 +2072,127 @@ def build_profile_view(c):
                     L(badge, 'font-size:18px;font-weight:600;color:var(--accent);font-family:var(--mono);margin-bottom:6px;')
                     L(bdesc, 'font-size:11px;color:var(--text);line-height:1.5;')
 
+def build_about_view(c):
+    c.clear()
+    with c:
+        with D('max-width:760px;'):
+            # Header
+            with D('background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:32px;margin-bottom:16px;'):
+                with R('gap:16px;align-items:center;margin-bottom:20px;'):
+                    with D('width:56px;height:56px;border-radius:12px;background:var(--bg3);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;'):
+                        ICO('ti-chart-candle', 'color:var(--accent);', 28)
+                    with C('gap:4px;'):
+                        L('StockMind Terminal', 'font-size:22px;font-weight:700;color:var(--white);')
+                        L('v2.0  ·  Paper Trading & Market Intelligence', 'font-size:11px;color:var(--text3);font-family:var(--mono);')
+                L('StockMind Terminal is a real-time paper trading simulator and market research tool built for anyone who wants to learn how financial markets work without risking real money. It pulls live market data, gives you $10,000 of virtual cash to practice with, and pairs everything with an AI advisor to help you think through trades.', 'font-size:13px;color:var(--text);line-height:1.7;')
+
+            # Purpose
+            with D('background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:16px;'):
+                with R('gap:8px;align-items:center;margin-bottom:14px;'):
+                    ICO('ti-target', 'color:var(--accent);', 16)
+                    L('PURPOSE', 'font-size:10px;color:var(--accent);font-family:var(--mono);letter-spacing:1.5px;font-weight:600;')
+                for txt in [
+                    'Learn trading mechanics in a zero-risk environment with real market data.',
+                    'Understand how indicators like RSI, MACD, and moving averages behave on actual price charts.',
+                    'Practice portfolio management — diversification, position sizing, entry and exit timing.',
+                    'Explore thousands of stocks, ETFs, and crypto pairs with live prices and sector filters.',
+                    'Get plain-English analysis from an AI that explains what\'s happening in the market right now.',
+                ]:
+                    with R('gap:10px;align-items:flex-start;margin-bottom:10px;'):
+                        D('width:5px;height:5px;border-radius:50%;background:var(--accent);flex-shrink:0;margin-top:6px;')
+                        L(txt, 'font-size:12px;color:var(--text);line-height:1.6;')
+
+            # Features
+            with D('background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:16px;'):
+                with R('gap:8px;align-items:center;margin-bottom:14px;'):
+                    ICO('ti-sparkles', 'color:#f59e0b;', 16)
+                    L('WHAT\'S INSIDE', 'font-size:10px;color:#f59e0b;font-family:var(--mono);letter-spacing:1.5px;font-weight:600;')
+                features = [
+                    ('ti-chart-candle', 'Live Charts', 'Candlestick & line charts with 1m to 5Y timeframes, MA/EMA overlays, RSI, MACD, Bollinger Bands, and real-time price updates every ~2 seconds.'),
+                    ('ti-building-store', 'Market Explorer', 'Browse 60+ stocks and crypto across sectors and indexes. Filter by gainers/losers, add to watchlist, and jump straight to the chart.'),
+                    ('ti-wallet', 'Paper Trading', 'Buy and sell with virtual money at real market prices. Track your P&L, win rate, and portfolio history over time.'),
+                    ('ti-robot', 'AI Advisor — Max', 'Powered by Llama 3.3 70B via Groq. Answers questions about stocks, explains indicators, and gives honest takes on your trades.'),
+                    ('ti-news', 'Market News', 'Latest headlines for any stock you\'re watching, pulled fresh each time.'),
+                    ('ti-file-text', 'Trade Reports', 'Generate a PDF summary of your portfolio performance and analysis for any stock.'),
+                ]
+                with D('display:grid;grid-template-columns:repeat(auto-fill, minmax(210px, 1fr));gap:10px;'):
+                    for ico, title, desc in features:
+                        with D('background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:14px;'):
+                            with R('gap:8px;align-items:center;margin-bottom:8px;'):
+                                ICO(ico, 'color:var(--accent);', 14)
+                                L(title, 'font-size:11px;font-weight:600;color:var(--white);')
+                            L(desc, 'font-size:10px;color:var(--text2);line-height:1.55;')
+
+            # Limitations
+            with D('background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:16px;'):
+                with R('gap:8px;align-items:center;margin-bottom:14px;'):
+                    ICO('ti-alert-triangle', 'color:#ef4444;', 16)
+                    L('LIMITATIONS & DISCLAIMERS', 'font-size:10px;color:#ef4444;font-family:var(--mono);letter-spacing:1.5px;font-weight:600;')
+                limits = [
+                    'Price data comes from Yahoo Finance\'s free, unofficial API. Prices are typically delayed 15–20 minutes — this is not a live trading platform.',
+                    'This is a paper trading simulator only. No real money, no real trades, no connection to any brokerage.',
+                    'AI analysis is for educational purposes and should not be taken as financial advice. Always do your own research.',
+                    'Historical data availability varies by ticker and timeframe. Some intervals are limited to 7–60 days of history by Yahoo\'s API.',
+                    'Market data coverage focuses on US equities. International markets and some asset classes may have limited or no data.',
+                ]
+                for txt in limits:
+                    with R('gap:10px;align-items:flex-start;margin-bottom:10px;'):
+                        ICO('ti-point', 'color:#ef444488;flex-shrink:0;margin-top:1px;', 12)
+                        L(txt, 'font-size:12px;color:var(--text);line-height:1.6;')
+
+            # Tech stack
+            with D('background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:16px;'):
+                with R('gap:8px;align-items:center;margin-bottom:14px;'):
+                    ICO('ti-code', 'color:#6366f1;', 16)
+                    L('BUILT WITH', 'font-size:10px;color:#6366f1;font-family:var(--mono);letter-spacing:1.5px;font-weight:600;')
+                stack = [
+                    ('Python + NiceGUI', 'Full-stack web framework that runs the entire app as a single Python file'),
+                    ('yfinance', 'Pulls real-time and historical market data from Yahoo Finance'),
+                    ('LightweightCharts', 'High-performance financial charting by TradingView'),
+                    ('Chart.js', 'Portfolio history, pie, and bar charts'),
+                    ('Groq + Llama 3.3 70B', 'Powers the AI advisor — fast, free, and surprisingly sharp'),
+                    ('Tabler Icons + IBM Plex Mono', 'Icons and the monospaced font used throughout'),
+                ]
+                with R('gap:6px;flex-wrap:wrap;'):
+                    for name, desc in stack:
+                        with D('background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:10px 14px;'):
+                            L(name, 'font-size:11px;font-weight:600;color:var(--white);font-family:var(--mono);margin-bottom:3px;')
+                            L(desc, 'font-size:9px;color:var(--text3);')
+
+            # Creators
+            with D('background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:24px;margin-bottom:16px;'):
+                with R('gap:8px;align-items:center;margin-bottom:16px;'):
+                    ICO('ti-users', 'color:#ec4899;', 16)
+                    L('CREATORS', 'font-size:10px;color:#ec4899;font-family:var(--mono);letter-spacing:1.5px;font-weight:600;')
+                with R('gap:14px;flex-wrap:wrap;'):
+                    for name, role, detail, emoji in [
+                        ('Matt', 'Creator & Product Vision', 'Conceived StockMind, directed the product, defined every feature and interaction from the ground up.', '🧠'),
+                        ('Claude (Anthropic)', 'AI Development Partner', 'Built the entire codebase — frontend, backend, charts, trading logic, AI integration — through iterative collaboration with Matt.', '🤖'),
+                    ]:
+                        with D('flex:1;min-width:200px;background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:16px;'):
+                            with R('gap:10px;align-items:center;margin-bottom:10px;'):
+                                with D('width:38px;height:38px;border-radius:10px;background:var(--bg2);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:18px;'):
+                                    L(emoji, '')
+                                with C('gap:2px;'):
+                                    L(name, 'font-size:13px;font-weight:600;color:var(--white);')
+                                    L(role, 'font-size:9px;color:var(--accent);font-family:var(--mono);')
+                            L(detail, 'font-size:11px;color:var(--text2);line-height:1.55;')
+
+            # Inspiration
+            with D('background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:24px;'):
+                with R('gap:8px;align-items:center;margin-bottom:12px;'):
+                    ICO('ti-bulb', 'color:#f59e0b;', 16)
+                    L('INSPIRATION', 'font-size:10px;color:#f59e0b;font-family:var(--mono);letter-spacing:1.5px;font-weight:600;')
+                L('StockMind was born from a simple frustration: most trading simulators are either too simplified to be educational, or too complex for someone just starting out. The goal was to build something that feels like a real trading terminal — live data, real indicators, actual market structure — but without the intimidation (or financial risk) of real money.', 'font-size:12px;color:var(--text);line-height:1.7;margin-bottom:12px;')
+                L('The terminal aesthetic was inspired by tools like TradingView and Bloomberg Terminal — professional, data-dense, built for people who take markets seriously. The AI layer was added because markets can be confusing, and sometimes you just need someone to explain what the RSI is actually telling you.', 'font-size:12px;color:var(--text);line-height:1.7;')
+
+
 VIEWS = {
     'chart': build_chart_view, 'portfolio': build_portfolio_view,
     'explorer': build_explorer_view, 'history': build_history_view,
     'report': build_report_view, 'news': build_news_view,
     'settings': build_settings_view, 'profile': build_profile_view,
+    'about': build_about_view,
 }
 
 def switch_view(v):
@@ -2196,6 +2338,7 @@ with D('display:flex;width:100vw;height:100vh;min-height:0;overflow:hidden;backg
         refs['sb_news'] = sb('ti-news', 'News & Alerts', on_click=lambda e: switch_view('news'))
         D('width:26px;height:1px;background:var(--border);margin:4px 0;')
         refs['sb_settings'] = sb('ti-settings', 'Settings', on_click=lambda e: switch_view('settings'))
+        refs['sb_about'] = sb('ti-info-circle', 'About StockMind', on_click=lambda e: switch_view('about'))
         sb('ti-info-circle', 'About StockMind Terminal - paper trading and AI market analysis', on_click=lambda e: ui.notify('StockMind Terminal v2 - Paper trading simulator with AI advisor. Not real financial advice.', type='info', timeout=4000))
         D('flex:1;')
         with D('width:30px;height:30px;border-radius:50%;background:var(--bg3);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:16px;').on('click', lambda e: switch_view('profile')).tooltip('Profile'):
@@ -2424,4 +2567,6 @@ with D('display:flex;width:100vw;height:100vh;min-height:0;overflow:hidden;backg
 
 
 if __name__ in {'__main__', '__mp_main__'}:
-    ui.run(title='StockMind Terminal', favicon='\U0001F4C8', dark=True, port=8080, show=True, reload=False)
+    port = int(os.environ.get('PORT', 8080))
+    ui.run(title='StockMind Terminal', favicon='\U0001F4C8', dark=True,
+           host='0.0.0.0', port=port, show=False, reload=False)

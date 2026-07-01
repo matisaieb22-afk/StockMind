@@ -1,4 +1,5 @@
 {
+  "version": 3,
   "watchlist": [
     "AAPL",
     "NVDA",
@@ -12,45 +13,45 @@
     "JPM"
   ],
   "profile": {
-    "username": "Mati",
-    "avatar": "\ud83e\uddd9",
+    "username": "Trader",
+    "avatar": "\ud83d\ude00",
     "joined": "30 Jun 2026",
     "theme": "blue"
   },
   "settings": {
     "accent": "#3b82f6",
     "chart_style": "candles",
-    "show_ma20": false,
-    "show_ma50": false,
+    "show_ma20": true,
+    "show_ma50": true,
     "show_ema12": false,
     "show_volume": true,
     "compact_mode": false,
     "right_panel": true
   },
   "account": {
-    "cash": 22858.6,
-    "start_cash": 25000,
+    "cash": 6620.26,
+    "start_cash": 10000.0,
     "positions": {
-      "NFLX": {
-        "shares": 30.0,
-        "avg_cost": 71.38,
-        "buy_date": "30 Jun 2026 19:32"
+      "META": {
+        "shares": 6.0,
+        "avg_cost": 563.29,
+        "buy_date": "30 Jun 2026 22:44"
       }
     },
     "history": [
       {
         "type": "BUY",
-        "ticker": "NFLX",
-        "shares": 30.0,
-        "price": 71.38,
-        "total": 2141.4,
-        "date": "30 Jun 2026 19:32",
-        "cash_after": 22858.6
+        "ticker": "META",
+        "shares": 6.0,
+        "price": 563.29,
+        "total": 3379.74,
+        "date": "30 Jun 2026 22:44",
+        "cash_after": 6620.26
       }
     ]
   },
-  "state_ticker": "NFLX",
-  "state_period": "1mo",
+  "state_ticker": "META",
+  "state_period": "3mo",
   "state_chart_type": "candles",
   "chat_log": [
     {
@@ -59,11 +60,11 @@
     },
     {
       "role": "user",
-      "text": "Should I take profits?"
+      "text": "Explain the RSI for META?"
     },
     {
       "role": "ai",
-      "text": "You're not even in a trade yet. You've got a clean slate with no positions open. You're looking at Netflix (NFLX) right now, though. What do you think about it? Want to consider opening a position, or do you have some other stock in mind?"
+      "text": "The RSI (Relative Strength Index) for META is currently at 43.0, which is considered neutral. RSI is a momentum indicator that measures how quickly a stock's price is changing. It's calculated based on the average gain of up days and the average loss of down days over a certain period, usually 14 days.\n\nThink of RSI like a speedometer for a stock's price movement. When RSI is:\n\n* Below 30, it's considered oversold, meaning the stock might be due for a bounce.\n* Above 70, it's considered overbought, meaning the stock might be due for a pullback.\n* Between 30 and 70, like META's 43.0, it's neutral, meaning the stock is just cruising along without any strong momentum.\n\nIn this case, META's RSI of 43.0 suggests that the stock is not showing any extreme bullish or bearish tendencies. It's just kinda... chill. This could mean that the stock is consolidating, waiting for its next big move. But it's always important to keep an eye on it, as RSI can change quickly. What do you think about META's current price? Want to ride it out or make a move?"
     }
   ]
 }

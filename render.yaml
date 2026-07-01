@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: stockmind-terminal
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python app.py
+    envVars:
+      - key: PORT
+        generateValue: false
+    healthCheckPath: /
