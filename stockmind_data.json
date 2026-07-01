@@ -1,0 +1,69 @@
+{
+  "watchlist": [
+    "AAPL",
+    "NVDA",
+    "TSLA",
+    "MSFT",
+    "AMZN",
+    "META",
+    "GOOGL",
+    "AMD",
+    "NFLX",
+    "JPM"
+  ],
+  "profile": {
+    "username": "Mati",
+    "avatar": "\ud83e\uddd9",
+    "joined": "30 Jun 2026",
+    "theme": "blue"
+  },
+  "settings": {
+    "accent": "#3b82f6",
+    "chart_style": "candles",
+    "show_ma20": false,
+    "show_ma50": false,
+    "show_ema12": false,
+    "show_volume": true,
+    "compact_mode": false,
+    "right_panel": true
+  },
+  "account": {
+    "cash": 22858.6,
+    "start_cash": 25000,
+    "positions": {
+      "NFLX": {
+        "shares": 30.0,
+        "avg_cost": 71.38,
+        "buy_date": "30 Jun 2026 19:32"
+      }
+    },
+    "history": [
+      {
+        "type": "BUY",
+        "ticker": "NFLX",
+        "shares": 30.0,
+        "price": 71.38,
+        "total": 2141.4,
+        "date": "30 Jun 2026 19:32",
+        "cash_after": 22858.6
+      }
+    ]
+  },
+  "state_ticker": "NFLX",
+  "state_period": "1mo",
+  "state_chart_type": "candles",
+  "chat_log": [
+    {
+      "role": "ai",
+      "text": "Hey! I'm Max, your trading buddy. You've got $10,000 to practice with \u2014 zero risk, real market data. Ask me about any stock, what to watch out for, or whether a trade makes sense. What are you looking at today?"
+    },
+    {
+      "role": "user",
+      "text": "Should I take profits?"
+    },
+    {
+      "role": "ai",
+      "text": "You're not even in a trade yet. You've got a clean slate with no positions open. You're looking at Netflix (NFLX) right now, though. What do you think about it? Want to consider opening a position, or do you have some other stock in mind?"
+    }
+  ]
+}
